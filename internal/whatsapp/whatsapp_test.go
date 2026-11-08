@@ -118,3 +118,28 @@ func openFixture(t *testing.T) *Store {
 	t.Cleanup(func() { s.Close() })
 	return s
 }
+
+func TestMediaReturnsOnlyMessagesWithFiles(t *testing.T) {
+	s := openFixture(t)
+	tests := []struct {
+		chat int64
+		want int
+	}{
+		{1, 1}, // one image, one text message
+		{2, 0}, // a document without a local file, one text message
+	}
+	for _, tt := range tests {
+		msgs, err := s.Media(tt.chat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(msgs) != tt.want {
+			t.Errorf("chat %d: got %d media messages, want %d", tt.chat, len(msgs), tt.want)
+		}
+		for _, m := range msgs {
+			if !m.HasMedia() {
+				t.Errorf("chat %d: message %d has no media", tt.chat, m.ID)
+			}
+		}
+	}
+}

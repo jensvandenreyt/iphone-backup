@@ -143,6 +143,12 @@ func TestCloseRemovesTempDir(t *testing.T) {
 // buildBackup writes a minimal backup with one file, mirroring the layout iOS uses.
 func buildBackup(t *testing.T, encrypted bool) string {
 	t.Helper()
+	return buildBackupWithSize(t, encrypted, int64(len(testContent)))
+}
+
+// buildBackupWithSize is buildBackup with the file size recorded in the manifest set to manifestSize.
+func buildBackupWithSize(t *testing.T, encrypted bool, manifestSize int64) string {
+	t.Helper()
 	dir := t.TempDir()
 	classKey, manifestKey, fileKey := randBytes(32), randBytes(32), randBytes(32)
 
@@ -156,7 +162,7 @@ func buildBackup(t *testing.T, encrypted bool) string {
 	fileID := hex.EncodeToString(sum[:])
 	writeFile(t, filepath.Join(dir, fileID[:2], fileID), content)
 
-	db := buildManifestDB(t, fileID, mbFile(t, int64(len(testContent)), encKey))
+	db := buildManifestDB(t, fileID, mbFile(t, manifestSize, encKey))
 	manifest := map[string]any{"IsEncrypted": encrypted}
 	if encrypted {
 		db = encryptCBC(t, manifestKey, db)

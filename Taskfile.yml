@@ -2,11 +2,34 @@ version: '3'
 
 tasks:
   build:
-    desc: Build the iphone-backup binary into bin/
+    desc: Build the iphone-backup binary for this computer into bin/
     cmds:
-      - go build -o bin/iphone-backup ./cmd/iphone-backup
+      - go build -o bin/iphone-backup{{exeExt}} ./cmd/iphone-backup
+
+  build:windows:
+    desc: Build a Windows binary into bin/, from any operating system
+    env:
+      GOOS: windows
+      GOARCH: amd64
+    cmds:
+      - go build -o bin/iphone-backup.exe ./cmd/iphone-backup
+
+  build:mac:
+    desc: Build a macOS binary for Apple silicon into bin/, from any operating system
+    env:
+      GOOS: darwin
+      GOARCH: arm64
+    cmds:
+      - go build -o bin/iphone-backup-mac ./cmd/iphone-backup
 
   test:
     desc: Run all tests
     cmds:
       - go test ./...
+
+  licenses:
+    desc: Generate LICENSE-3RD-PARTY.md from the dependency licenses; set GOOS to report for another OS
+    cmds:
+      # The tool itself is built for this computer, so GOOS only applies to the report.
+      - GOOS= GOARCH= GOBIN="{{.ROOT_DIR}}/bin" go install github.com/google/go-licenses/v2@v2.0.1
+      - bin/go-licenses{{exeExt}} report ./... --ignore=github.com/jensvandenreyt/iphone-backup --template=LICENSE-3RD-PARTY.md.tpl > LICENSE-3RD-PARTY.md

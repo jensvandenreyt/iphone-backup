@@ -3,17 +3,23 @@ package backup
 
 import (
 	"bytes"
+	"crypto/aes"
 	"database/sql"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"time"
 
 	"howett.net/plist"
 	_ "modernc.org/sqlite"
+
+	"github.com/jensvandenreyt/iphone-backup/internal/applog"
 )
 
 var (
@@ -21,10 +27,30 @@ var (
 	ErrNotFound      = errors.New("file not found in backup")
 )
 
-// DefaultRoot returns the folder where Finder and Apple Configurator store backups.
+// DefaultRoot returns the folder where backups are stored on this computer: by Finder and Apple
+// Configurator on macOS, by iTunes or the Apple Devices app on Windows.
 func DefaultRoot() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "Application Support", "MobileSync", "Backup")
+	roots := defaultRoots(runtime.GOOS, home, os.Getenv("APPDATA"))
+	for _, r := range roots {
+		if _, err := os.Stat(r); err == nil {
+			return r
+		}
+	}
+	return roots[0]
+}
+
+// defaultRoots lists the possible backup folders for an operating system, most likely first.
+func defaultRoots(goos, home, appData string) []string {
+	if goos == "windows" {
+		return []string{
+			// The Apple Devices app and iTunes from the Microsoft Store.
+			filepath.Join(home, "Apple", "MobileSync", "Backup"),
+			// iTunes downloaded from apple.com.
+			filepath.Join(appData, "Apple Computer", "MobileSync", "Backup"),
+		}
+	}
+	return []string{filepath.Join(home, "Library", "Application Support", "MobileSync", "Backup")}
 }
 
 type Info struct {
@@ -79,7 +105,7 @@ func IsBackup(dir string) bool {
 func List(root string) ([]*Backup, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return nil, err
+		return nil, applog.Fail("list backups", err, "root", root)
 	}
 	var out []*Backup
 	for _, e := range entries {
@@ -87,11 +113,15 @@ func List(root string) ([]*Backup, error) {
 		if !e.IsDir() || !IsBackup(dir) {
 			continue
 		}
-		if b, err := Open(dir); err == nil {
-			out = append(out, b)
+		b, err := Open(dir)
+		if err != nil {
+			slog.Warn("skipping unreadable backup", "dir", dir, "err", err)
+			continue
 		}
+		out = append(out, b)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Info.LastBackup.After(out[j].Info.LastBackup) })
+	slog.Info("listed backups", "root", root, "count", len(out))
 	return out, nil
 }
 
@@ -99,11 +129,11 @@ func List(root string) ([]*Backup, error) {
 func Open(dir string) (*Backup, error) {
 	var m manifestPlist
 	if err := readPlist(filepath.Join(dir, "Manifest.plist"), &m); err != nil {
-		return nil, err
+		return nil, applog.Fail("read Manifest.plist", err, "dir", dir)
 	}
 	var info infoPlist
 	if err := readPlist(filepath.Join(dir, "Info.plist"), &info); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+		return nil, applog.Fail("read Info.plist", err, "dir", dir)
 	}
 	if info.DeviceName == "" {
 		info.DeviceName = filepath.Base(dir)
@@ -122,10 +152,13 @@ func Open(dir string) (*Backup, error) {
 	if m.IsEncrypted {
 		kb, err := parseKeybag(m.BackupKeyBag)
 		if err != nil {
-			return nil, err
+			return nil, applog.Fail("parse keybag", err, "dir", dir)
 		}
 		b.keybag = kb
+		slog.Debug("parsed keybag", "dir", dir, "classes", len(kb.classes), "iter", kb.iter, "dpic", kb.dpic)
 	}
+	slog.Info("opened backup", "dir", dir, "device", b.Info.DeviceName, "product", b.Info.ProductType,
+		"ios", b.Info.ProductVersion, "lastBackup", b.Info.LastBackup, "encrypted", b.Encrypted)
 	return b, nil
 }
 
@@ -144,27 +177,45 @@ func (b *Backup) Unlock(password string) error {
 	if b.db != nil {
 		return nil
 	}
+	slog.Info("unlocking backup", "dir", b.Dir, "encrypted", b.Encrypted)
 	if b.Encrypted {
-		if err := b.keybag.unlock(password); err != nil {
+		if err := b.unlockKeybag(password); err != nil {
 			return err
 		}
 	}
 	if b.tmpDir == "" {
 		tmp, err := os.MkdirTemp("", "iphone-backup-")
 		if err != nil {
-			return err
+			return applog.Fail("create temp dir", err)
 		}
 		b.tmpDir = tmp
+		slog.Debug("created temp dir", "path", tmp)
 	}
 	path := b.TempPath("Manifest.db")
 	if err := b.writeManifestDB(path); err != nil {
-		return err
+		return applog.Fail("prepare Manifest.db", err, "dir", b.Dir)
 	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
-		return err
+		return applog.Fail("open Manifest.db", err, "path", path)
 	}
 	b.db = db
+	slog.Info("unlocked backup", "dir", b.Dir)
+	return nil
+}
+
+func (b *Backup) unlockKeybag(password string) error {
+	start := time.Now()
+	err := b.keybag.unlock(password)
+	took := time.Since(start).Round(time.Millisecond)
+	if errors.Is(err, ErrWrongPassword) {
+		slog.Warn("wrong password", "dir", b.Dir, "took", took)
+		return err
+	}
+	if err != nil {
+		return applog.Fail("derive backup key", err, "dir", b.Dir)
+	}
+	slog.Info("derived backup key", "took", took)
 	return nil
 }
 
@@ -174,9 +225,11 @@ func (b *Backup) writeManifestDB(path string) error {
 		return err
 	}
 	if b.Encrypted {
+		encrypted := len(data)
 		if data, err = b.decryptManifestDB(data); err != nil {
 			return err
 		}
+		slog.Debug("decrypted Manifest.db", "encryptedBytes", encrypted, "bytes", len(data))
 	}
 	return os.WriteFile(path, data, 0o600)
 }
@@ -188,11 +241,11 @@ func (b *Backup) decryptManifestDB(data []byte) ([]byte, error) {
 	class := binary.LittleEndian.Uint32(b.manifestKey[:4])
 	key, err := b.keybag.unwrapKey(class, b.manifestKey[4:])
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unwrap manifest key (class %d): %w", class, err)
 	}
 	data, err = decryptCBC(data, key)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decrypt: %w", err)
 	}
 	return trimToPages(data)
 }
@@ -226,17 +279,55 @@ func (b *Backup) FindFile(domain, relativePath string) (*File, error) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
-		return nil, err
+		return nil, applog.Fail("look up file", err, "domain", domain, "path", relativePath)
 	}
 	f := &File{ID: id, Domain: domain, RelativePath: relativePath}
 	if err := decodeMBFile(blob, f); err != nil {
-		return nil, err
+		return nil, applog.Fail("decode file metadata", err, "domain", domain, "path", relativePath, "fileID", id)
 	}
 	return f, nil
 }
 
+// Paths returns the relative paths of all regular files in domain that start with prefix.
+// It reads the manifest once, which is much faster than calling FindFile per file.
+func (b *Backup) Paths(domain, prefix string) (map[string]bool, error) {
+	start := time.Now()
+	slog.Debug("listing files", "domain", domain, "prefix", prefix)
+	rows, err := b.db.Query(
+		`SELECT relativePath FROM Files WHERE domain = ? AND flags = 1 AND substr(relativePath, 1, ?) = ?`,
+		domain, len(prefix), prefix,
+	)
+	if err != nil {
+		return nil, applog.Fail("list files", err, "domain", domain, "prefix", prefix)
+	}
+	defer rows.Close()
+	paths := map[string]bool{}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, applog.Fail("list files", err, "domain", domain, "prefix", prefix)
+		}
+		paths[p] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, applog.Fail("list files", err, "domain", domain, "prefix", prefix)
+	}
+	slog.Debug("listed files", "domain", domain, "prefix", prefix, "count", len(paths),
+		"took", time.Since(start).Round(time.Millisecond))
+	return paths, nil
+}
+
 // Extract writes the plaintext content of f to dst.
 func (b *Backup) Extract(f *File, dst io.Writer) error {
+	if err := b.extract(f, dst); err != nil {
+		return applog.Fail("extract "+f.RelativePath, err, "domain", f.Domain, "path", f.RelativePath,
+			"fileID", f.ID, "size", f.Size, "class", f.protectionClass)
+	}
+	slog.Debug("extracted file", "domain", f.Domain, "path", f.RelativePath, "fileID", f.ID, "size", f.Size)
+	return nil
+}
+
+func (b *Backup) extract(f *File, dst io.Writer) error {
 	src, err := os.Open(filepath.Join(b.Dir, f.ID[:2], f.ID))
 	if err != nil {
 		return err
@@ -254,16 +345,25 @@ func (b *Backup) Extract(f *File, dst io.Writer) error {
 	}
 	key, err := b.keybag.unwrapKey(f.protectionClass, f.encryptionKey)
 	if err != nil {
-		return err
+		return fmt.Errorf("unwrap file key: %w", err)
 	}
-	return decryptStream(dst, src, key, f.Size)
+	n, err := decryptStream(dst, src, key, f.Size)
+	if fi, serr := src.Stat(); errors.Is(err, errTruncated) && serr == nil {
+		minSize := (f.Size + aes.BlockSize - 1) / aes.BlockSize * aes.BlockSize
+		err = fmt.Errorf("%w; encrypted file on disk is %d bytes, expected at least %d", err, fi.Size(), minSize)
+	}
+	if err == nil && n != f.Size {
+		slog.Warn("file is smaller than the manifest says, used its padding to find the end",
+			"domain", f.Domain, "path", f.RelativePath, "fileID", f.ID, "manifestSize", f.Size, "size", n)
+	}
+	return err
 }
 
 // ExtractFile writes the plaintext content of f to a new file at path.
 func (b *Backup) ExtractFile(f *File, path string) error {
 	out, err := os.Create(path)
 	if err != nil {
-		return err
+		return applog.Fail("create file", err, "path", path)
 	}
 	err = b.Extract(f, out)
 	if cerr := out.Close(); err == nil {
@@ -284,5 +384,9 @@ func (b *Backup) Close() error {
 	if b.tmpDir == "" {
 		return nil
 	}
-	return os.RemoveAll(b.tmpDir)
+	if err := os.RemoveAll(b.tmpDir); err != nil {
+		return applog.Fail("remove temp dir", err, "path", b.tmpDir)
+	}
+	slog.Debug("removed temp dir", "path", b.tmpDir)
+	return nil
 }

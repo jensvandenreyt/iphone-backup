@@ -8,8 +8,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/vandenreyt/iphone-backup/internal/backup"
-	"github.com/vandenreyt/iphone-backup/internal/whatsapp"
+	"github.com/jensvandenreyt/iphone-backup/internal/backup"
+	"github.com/jensvandenreyt/iphone-backup/internal/whatsapp"
 )
 
 type unlockedMsg struct{ store *whatsapp.Store }

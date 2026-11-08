@@ -9,8 +9,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/vandenreyt/iphone-backup/internal/backup"
-	"github.com/vandenreyt/iphone-backup/internal/whatsapp"
+	"github.com/jensvandenreyt/iphone-backup/internal/backup"
+	"github.com/jensvandenreyt/iphone-backup/internal/whatsapp"
 )
 
 // screen is one view of the app. Update returns the screen to show next.
@@ -70,9 +70,11 @@ func (a *App) View() string { return a.cur.View() }
 func (a *App) Close() { a.s.close() }
 
 func expandHome(p string) string {
-	if rest, ok := strings.CutPrefix(p, "~/"); ok {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, rest)
+	for _, prefix := range []string{"~/", `~\`} {
+		if rest, ok := strings.CutPrefix(p, prefix); ok {
+			home, _ := os.UserHomeDir()
+			return filepath.Join(home, rest)
+		}
 	}
 	return p
 }

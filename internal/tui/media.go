@@ -4,14 +4,15 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/vandenreyt/iphone-backup/internal/export"
-	"github.com/vandenreyt/iphone-backup/internal/whatsapp"
+	"github.com/jensvandenreyt/iphone-backup/internal/export"
+	"github.com/jensvandenreyt/iphone-backup/internal/whatsapp"
 )
 
 var (
@@ -72,23 +73,14 @@ type media struct {
 	list     list.Model
 }
 
-func newMedia(s *session, chat whatsapp.Chat, back screen) (screen, error) {
-	msgs, err := s.store.Messages(chat.ID)
-	if err != nil {
-		return nil, err
-	}
-	m := &media{s: s, chat: chat, back: back, selected: map[int64]bool{}}
-	for _, msg := range msgs {
-		if msg.HasMedia() {
-			m.all = append(m.all, mediaItem{msg, export.InBackup(s.backup, msg)})
-		}
-	}
+func newMedia(s *session, chat whatsapp.Chat, items []mediaItem, back screen) screen {
+	m := &media{s: s, chat: chat, back: back, all: items, selected: map[int64]bool{}}
 	m.list = list.New(m.visible(), mediaDelegate{m.selected}, s.width, s.height)
 	m.list.DisableQuitKeybindings()
 	m.list.SetStatusBarItemName("file", "files")
 	m.list.AdditionalShortHelpKeys = func() []key.Binding { return []key.Binding{keySelect, keyAll, keyType, keyExport} }
 	m.updateTitle()
-	return m, nil
+	return m
 }
 
 func (m *media) visible() []list.Item {
@@ -173,21 +165,21 @@ func (m *media) toggleVisible() {
 
 // startExport exports the selected items, or everything visible when nothing is selected.
 func (m *media) startExport() (screen, tea.Cmd, bool) {
-	var items []whatsapp.Message
+	var items []exportItem
 	for _, it := range m.all {
 		if m.selected[it.m.ID] {
-			items = append(items, it.m)
+			items = append(items, exportItem{m: it.m})
 		}
 	}
 	if len(items) == 0 {
 		for _, it := range m.list.VisibleItems() {
-			items = append(items, it.(mediaItem).m)
+			items = append(items, exportItem{m: it.(mediaItem).m})
 		}
 	}
 	if len(items) == 0 {
 		return m, nil, true
 	}
-	next, cmd := newExporter(m.s, m.chat, items, m)
+	next, cmd := newExporter(m.s, m.chat.Name, filepath.Join("export", export.Sanitize(m.chat.Name)), items, m)
 	return next, cmd, true
 }
 

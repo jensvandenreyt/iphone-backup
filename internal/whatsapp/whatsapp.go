@@ -4,12 +4,14 @@ package whatsapp
 import (
 	"database/sql"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 
-	"github.com/vandenreyt/iphone-backup/internal/backup"
+	"github.com/jensvandenreyt/iphone-backup/internal/applog"
+	"github.com/jensvandenreyt/iphone-backup/internal/backup"
 )
 
 // Domain is the backup domain of WhatsApp's shared app group container.
@@ -96,12 +98,14 @@ type Store struct {
 
 // Load extracts ChatStorage.sqlite (and its WAL, if present) from an unlocked backup and opens it.
 func Load(b *backup.Backup) (*Store, error) {
+	slog.Info("loading WhatsApp", "domain", Domain)
 	for _, name := range []string{dbName, dbName + "-wal"} {
 		f, err := b.FindFile(Domain, name)
 		if errors.Is(err, backup.ErrNotFound) {
 			if name == dbName {
-				return nil, ErrNotFound
+				return nil, applog.Fail("find WhatsApp database", ErrNotFound, "domain", Domain, "path", name)
 			}
+			slog.Debug("no WAL file in backup", "path", name)
 			continue
 		}
 		if err != nil {
@@ -110,6 +114,7 @@ func Load(b *backup.Backup) (*Store, error) {
 		if err := b.ExtractFile(f, b.TempPath(name)); err != nil {
 			return nil, err
 		}
+		slog.Debug("extracted WhatsApp database file", "path", name, "size", f.Size)
 	}
 	return Open(b.TempPath(dbName))
 }
@@ -117,12 +122,13 @@ func Load(b *backup.Backup) (*Store, error) {
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
-		return nil, err
+		return nil, applog.Fail("open WhatsApp database", err, "path", path)
 	}
 	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, err
+		return nil, applog.Fail("open WhatsApp database", err, "path", path)
 	}
+	slog.Info("opened WhatsApp database", "path", path)
 	return &Store{db: db}, nil
 }
 
@@ -140,7 +146,7 @@ func (s *Store) Chats() ([]Chat, error) {
 		GROUP BY s.Z_PK
 		ORDER BY s.ZLASTMESSAGEDATE DESC`)
 	if err != nil {
-		return nil, err
+		return nil, applog.Fail("query chats", err)
 	}
 	defer rows.Close()
 	var chats []Chat
@@ -149,7 +155,7 @@ func (s *Store) Chats() ([]Chat, error) {
 		var sessionType int
 		var last float64
 		if err := rows.Scan(&c.ID, &c.Name, &c.JID, &sessionType, &last, &c.MessageCount, &c.MediaCount); err != nil {
-			return nil, err
+			return nil, applog.Fail("read chat row", err)
 		}
 		c.IsGroup = sessionType == 1
 		c.LastMessage = coreDataTime(last)
@@ -158,11 +164,22 @@ func (s *Store) Chats() ([]Chat, error) {
 		}
 		chats = append(chats, c)
 	}
-	return chats, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, applog.Fail("read chats", err)
+	}
+	slog.Info("loaded chats", "count", len(chats))
+	return chats, nil
 }
 
 // Messages returns the messages of a chat in chronological order.
-func (s *Store) Messages(chatID int64) ([]Message, error) {
+func (s *Store) Messages(chatID int64) ([]Message, error) { return s.messages(chatID, false) }
+
+// Media returns only the messages of a chat that have a media file, in chronological order.
+func (s *Store) Media(chatID int64) ([]Message, error) { return s.messages(chatID, true) }
+
+func (s *Store) messages(chatID int64, mediaOnly bool) ([]Message, error) {
+	start := time.Now()
+	slog.Debug("querying messages", "chat", chatID, "mediaOnly", mediaOnly)
 	rows, err := s.db.Query(`
 		SELECT m.Z_PK, COALESCE(m.ZMESSAGEDATE, 0), COALESCE(m.ZISFROMME, 0),
 			COALESCE(m.ZMESSAGETYPE, 0), COALESCE(m.ZTEXT, ''),
@@ -175,10 +192,10 @@ func (s *Store) Messages(chatID int64) ([]Message, error) {
 		LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
 		LEFT JOIN ZWAPROFILEPUSHNAME pn ON pn.ZJID = gm.ZMEMBERJID
 		LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
-		WHERE m.ZCHATSESSION = ?
-		ORDER BY m.ZMESSAGEDATE, m.Z_PK`, chatID)
+		WHERE m.ZCHATSESSION = ? AND (? = 0 OR COALESCE(mi.ZMEDIALOCALPATH, '') != '')
+		ORDER BY m.ZMESSAGEDATE, m.Z_PK`, chatID, mediaOnly)
 	if err != nil {
-		return nil, err
+		return nil, applog.Fail("query messages", err, "chat", chatID)
 	}
 	defer rows.Close()
 	var msgs []Message
@@ -186,12 +203,17 @@ func (s *Store) Messages(chatID int64) ([]Message, error) {
 		var m Message
 		var date float64
 		if err := rows.Scan(&m.ID, &date, &m.FromMe, &m.Type, &m.Text, &m.Sender, &m.MediaPath, &m.MediaTitle, &m.MediaSize); err != nil {
-			return nil, err
+			return nil, applog.Fail("read message row", err, "chat", chatID)
 		}
 		m.Date = coreDataTime(date)
 		msgs = append(msgs, m)
 	}
-	return msgs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, applog.Fail("read messages", err, "chat", chatID)
+	}
+	slog.Debug("loaded messages", "chat", chatID, "mediaOnly", mediaOnly, "count", len(msgs),
+		"took", time.Since(start).Round(time.Millisecond))
+	return msgs, nil
 }
 
 // ManifestPath maps a ZMEDIALOCALPATH value to its relativePath in the backup manifest.

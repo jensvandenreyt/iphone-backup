@@ -4,13 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
+	"runtime"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/vandenreyt/iphone-backup/internal/backup"
+	"github.com/jensvandenreyt/iphone-backup/internal/backup"
 )
 
 // pickerItem is a backup, or the "open other directory" entry when b is nil.
@@ -59,6 +61,7 @@ func newPicker(s *session, dir string) (screen, tea.Cmd) {
 
 // open goes straight to the unlock screen when dir is a backup, and lists its backups otherwise.
 func (p *picker) open(dir string) (screen, tea.Cmd) {
+	slog.Info("opening directory", "dir", dir)
 	p.list.Title = "iPhone backups in " + dir
 	if backup.IsBackup(dir) {
 		b, err := backup.Open(dir)
@@ -118,6 +121,7 @@ func (p *picker) choose() (screen, tea.Cmd) {
 		p.typing, p.err = true, nil
 		return p, p.input.Focus()
 	}
+	slog.Info("selected backup", "dir", item.b.Dir)
 	return newUnlock(p.s, item.b, p)
 }
 
@@ -150,7 +154,7 @@ func (p *picker) View() string {
 }
 
 func errText(err error) string {
-	if errors.Is(err, fs.ErrPermission) {
+	if errors.Is(err, fs.ErrPermission) && runtime.GOOS == "darwin" {
 		return err.Error() + "\nGive your terminal Full Disk Access in System Settings > Privacy & Security, then restart it."
 	}
 	return err.Error()

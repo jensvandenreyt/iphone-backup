@@ -1,4 +1,4 @@
-module github.com/vandenreyt/iphone-backup
+module github.com/jensvandenreyt/iphone-backup
 
 go 1.26.1
 
