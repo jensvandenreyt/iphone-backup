@@ -95,9 +95,11 @@ func TestFileNameFitsFileSystemLimit(t *testing.T) {
 	if len(name) > maxNameBytes || !strings.HasSuffix(name, ".pdf") || !utf8.ValidString(name) {
 		t.Errorf("FileName = %q (%d bytes), want at most %d valid UTF-8 bytes ending in .pdf", name, len(name), maxNameBytes)
 	}
-	if _, err := os.Create(filepath.Join(t.TempDir(), name)); err != nil {
-		t.Errorf("cannot create file with the generated name: %v", err)
+	f, err := os.Create(filepath.Join(t.TempDir(), name))
+	if err != nil {
+		t.Fatalf("cannot create file with the generated name: %v", err)
 	}
+	f.Close() // Windows cannot remove the temp dir while the file is open
 }
 
 func TestTargetSkipsFilesAlreadyExported(t *testing.T) {
