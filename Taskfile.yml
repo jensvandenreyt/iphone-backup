@@ -1,10 +1,15 @@
 version: '3'
 
+vars:
+  VERSION:
+    sh: git describe --tags --always --dirty
+  LDFLAGS: -X main.version={{.VERSION}}
+
 tasks:
   build:
     desc: Build the iphone-backup binary for this computer into bin/
     cmds:
-      - go build -o bin/iphone-backup{{exeExt}} ./cmd/iphone-backup
+      - go build -ldflags='{{.LDFLAGS}}' -o bin/iphone-backup{{exeExt}} ./cmd/iphone-backup
 
   build:windows:
     desc: Build a Windows binary into bin/, from any operating system
@@ -12,7 +17,7 @@ tasks:
       GOOS: windows
       GOARCH: amd64
     cmds:
-      - go build -o bin/iphone-backup.exe ./cmd/iphone-backup
+      - go build -ldflags='{{.LDFLAGS}}' -o bin/iphone-backup.exe ./cmd/iphone-backup
 
   build:mac:
     desc: Build a macOS binary for Apple silicon into bin/, from any operating system
@@ -20,7 +25,7 @@ tasks:
       GOOS: darwin
       GOARCH: arm64
     cmds:
-      - go build -o bin/iphone-backup-mac ./cmd/iphone-backup
+      - go build -ldflags='{{.LDFLAGS}}' -o bin/iphone-backup-mac ./cmd/iphone-backup
 
   test:
     desc: Run all tests

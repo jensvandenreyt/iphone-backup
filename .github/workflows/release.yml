@@ -38,23 +38,18 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - uses: arduino/setup-task@v2
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Build
         env:
           CGO_ENABLED: '0'
         run: |
           mkdir dist
           for os in darwin windows; do
-            GOOS=$os task licenses
             for arch in arm64 amd64; do
               name="iphone-backup_${GITHUB_REF_NAME}_${os}_${arch}"
               exe=iphone-backup
               [ "$os" = windows ] && exe=iphone-backup.exe
               mkdir "$name"
-              GOOS=$os GOARCH=$arch go build -trimpath -ldflags='-s -w' -o "$name/$exe" ./cmd/iphone-backup
+              GOOS=$os GOARCH=$arch go build -trimpath -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" -o "$name/$exe" ./cmd/iphone-backup
               cp LICENSE LICENSE-3RD-PARTY.md "$name/"
               if [ "$os" = windows ]; then
                 zip -qr "dist/$name.zip" "$name"
